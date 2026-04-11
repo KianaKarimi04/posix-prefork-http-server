@@ -22,11 +22,18 @@ void send_file(int client, const char *path, int head_only) {
         return;
     }
 
+    const char *type = "text/html";
+    if (strstr(path, ".txt")) {
+        type = "text/plain";
+    }
+
     char header[256];
     sprintf(header,
         "HTTP/1.0 200 OK\r\n"
-        "Content-Type: text/html\r\n"
-        "\r\n");
+        "Content-Type: %s\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        type);
     write(client, header, strlen(header));
 
     if (!head_only) {
@@ -61,8 +68,9 @@ void handle_post(int client, char *buffer) {
     char *msg =
         "HTTP/1.0 200 OK\r\n"
         "Content-Type: text/plain\r\n"
+        "Connection: close\r\n"
         "\r\n"
-        "POST stored";
+        "POST stored\n";
     write(client, msg, strlen(msg));
 }
 
