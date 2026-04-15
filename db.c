@@ -6,12 +6,14 @@
 #include <ndbm.h>
 #include <fcntl.h>
 #include <string.h>
+#include <stdio.h>
 
-void store_data(const char *key, const char *value) {
-    DBM *db = dbm_open("data.db", O_RDWR | O_CREAT, 0666);
+int store_data(const char *key, const char *value) {
+    //DBM *db = dbm_open("data.db", O_RDWR, 0666);
+    DBM *db = dbm_open("data.db", O_RDWR | O_CREAT | O_TRUNC, 0666);
     if (!db) {
         perror("dbm_open");
-        return;
+        return -1;   // 🔥 return error
     }
 
     datum k, v;
@@ -23,6 +25,10 @@ void store_data(const char *key, const char *value) {
 
     if (dbm_store(db, k, v, DBM_REPLACE) != 0) {
         perror("dbm_store");
+        dbm_close(db);
+        return -1;   // 🔥 return error
     }
+
     dbm_close(db);
+    return 0;   // ✅ success
 }

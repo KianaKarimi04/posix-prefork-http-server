@@ -35,7 +35,10 @@ void load_handler() {
             dlclose(lib_handle);
         }
 
-        lib_handle = dlopen("./handler.so", RTLD_LAZY);
+        usleep(100000);  // 0.1 sec delay
+
+        dlerror();  // clear old errors
+        lib_handle = dlopen("./handler.so", RTLD_NOW | RTLD_GLOBAL);
         if (!lib_handle) {
             fprintf(stderr, "dlopen error: %s\n", dlerror());
             exit(1);
@@ -163,7 +166,7 @@ int main() {
     // parent monitors workers
     while (1) {
         monitor_workers();
-        pause();
+        sleep(1);
     }
 
     return 0;
