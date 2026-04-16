@@ -6,112 +6,83 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 #define PORT 8080
+#define WORKERS 4 // Change this to match the number of workers in your test
 #define SOURCE_LIB "./libhandler.so"
 
 int server_fd;
 time_t last_modified = 0;
 void *lib_handle = NULL;
-
-// Function pointer for the library function
 void (*handle_client)(int) = NULL;
 
+// Hot-reload logic: Unique naming ensures we bypass the OS linker cache
 void load_handler() {
   struct stat attr;
-
-  // 1. Check if the fresh build output exists
-  if (stat(SOURCE_LIB, &attr) == -1) {
+  if (stat(SOURCE_LIB, &attr) == -1)
     return;
-  }
 
-  // 2. Only reload if the file timestamp has changed
   if (attr.st_mtime != last_modified) {
     last_modified = attr.st_mtime;
-
-    printf("New version detected. Hot-reloading...\n");
-
-    // Close the previous handle if it exists
     if (lib_handle) {
       dlclose(lib_handle);
       lib_handle = NULL;
-      handle_client = NULL;
     }
 
-    // 3. Create a unique filename for this version to bypass dlopen caching.
-    // If we use the same name, the OS often returns the old memory map.
     char tmp_path[128];
-    snprintf(tmp_path, sizeof(tmp_path), "./handler_tmp_%ld.so", last_modified);
-
-    // 4. Copy the freshly built lib to the unique temporary path
+    snprintf(tmp_path, sizeof(tmp_path), "./handler_v%ld.so", last_modified);
     char copy_cmd[256];
     snprintf(copy_cmd, sizeof(copy_cmd), "cp %s %s", SOURCE_LIB, tmp_path);
-    if (system(copy_cmd) != 0) {
-      fprintf(stderr, "Failed to copy library for hot-reload\n");
-      return;
+
+    if (system(copy_cmd) == 0) {
+      lib_handle = dlopen(tmp_path, RTLD_NOW);
+      if (lib_handle) {
+        handle_client = dlsym(lib_handle, "handle_client");
+        printf("Successfully loaded handler version: %ld\n", last_modified);
+      }
+      unlink(tmp_path); // Remove temp file; the code remains in process memory
     }
-
-    // 5. Load the UNIQUE temporary file
-    void *new_handle = dlopen(tmp_path, RTLD_NOW);
-    if (!new_handle) {
-      fprintf(stderr, "dlopen error: %s\n", dlerror());
-      unlink(tmp_path);
-      return;
-    }
-
-    // 6. Resolve the symbol
-    void (*new_func)(int) = dlsym(new_handle, "handle_client");
-    if (!new_func) {
-      fprintf(stderr, "dlsym error: %s\n", dlerror());
-      dlclose(new_handle);
-      unlink(tmp_path);
-      return;
-    }
-
-    lib_handle = new_handle;
-    handle_client = new_func;
-
-    // 7. Cleanup: Delete the temp file from disk.
-    // The OS keeps the code in memory as long as the handle is open.
-    unlink(tmp_path);
-    printf("Successfully loaded new handler version!\n");
   }
 }
 
-void worker_loop() {
+// Worker logic: Each child process runs this loop
+void worker_process() {
   while (1) {
     int client = accept(server_fd, NULL, NULL);
-    if (client < 0) {
-      perror("accept");
+    if (client < 0)
       continue;
-    }
 
-    // Check for updates every time a request comes in
+    // Reload check happens inside the worker on every request
     load_handler();
 
-    if (!handle_client) {
-      const char *msg = "HTTP/1.0 500 Internal Server Error\r\n"
-                        "Content-Type: text/plain\r\n\r\n"
-                        "Handler not loaded\n";
-      write(client, msg, strlen(msg));
-      close(client);
-      continue;
+    if (handle_client) {
+      handle_client(client);
+    } else {
+      const char *err =
+          "HTTP/1.0 500 Internal Server Error\r\n\r\nHandler Missing";
+      write(client, err, strlen(err));
     }
-
-    printf("Worker %d handling request\n", getpid());
-    handle_client(client);
     close(client);
   }
 }
 
+// Spawn a worker using fork()
+pid_t spawn_worker() {
+  pid_t pid = fork();
+  if (pid == 0) {
+    worker_process();
+    exit(0); // Should never reach here unless loop breaks
+  }
+  return pid;
+}
+
 void handle_sigint(int sig) {
   (void)sig;
-  printf("\nShutting down server...\n");
-  if (lib_handle) {
-    dlclose(lib_handle);
-  }
+  printf("\nShutting down server and killing all workers...\n");
+  kill(0, SIGTERM); // Kill the entire process group
   close(server_fd);
   exit(0);
 }
@@ -119,13 +90,8 @@ void handle_sigint(int sig) {
 int main() {
   signal(SIGINT, handle_sigint);
 
-  struct sockaddr_in addr;
+  struct sockaddr_in addr = {0};
   server_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_fd < 0) {
-    perror("socket");
-    exit(1);
-  }
-
   int opt = 1;
   setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -137,22 +103,26 @@ int main() {
     perror("bind");
     exit(1);
   }
+  listen(server_fd, 10);
+  printf("Server running on port %d. Monitoring %d workers...\n", PORT,
+         WORKERS);
 
-  if (listen(server_fd, 10) < 0) {
-    perror("listen");
-    exit(1);
+  load_handler(); // Initial load for the parent
+
+  // Initial Prefork
+  for (int i = 0; i < WORKERS; i++) {
+    spawn_worker();
   }
 
-  printf("Server running on port %d...\n", PORT);
-
-  // Initial load attempt
-  load_handler();
-
-  if (!handle_client) {
-    fprintf(stderr, "Critical: Failed to load handler at startup\n");
-    exit(1);
+  // Monitor Loop: Parent waits for children to die and restarts them
+  while (1) {
+    int status;
+    pid_t dead_worker = wait(&status);
+    if (dead_worker > 0) {
+      printf("Worker %d died. Restarting...\n", dead_worker);
+      spawn_worker();
+    }
   }
 
-  worker_loop();
   return 0;
 }

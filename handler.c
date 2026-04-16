@@ -84,7 +84,7 @@ void handle_post(int client, char *buffer) {
   const char *msg = "HTTP/1.0 200 OK\r\n"
                     "Content-Type: text/plain\r\n"
                     "Connection: close\r\n\r\n"
-                    "it works!!!\n";
+                    "POST stored\n";
 
   write(client, msg, strlen(msg));
 }
